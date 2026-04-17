@@ -1,0 +1,44 @@
+name: Bug report
+description: File a bug report
+labels: ["bug"]
+
+body:
+  - type: textarea
+    attributes:
+      label: Bug description
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Expected behavior
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: Reproduction steps
+      description: This can include relevant command line input and output, such as UCI commands.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: browsers
+    attributes:
+      label: Operating system
+      multiple: true
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Version
+      description: |
+        e.g., 0.7.0-dev, commit SHA: b7d8952
+    validations:
+      required: true

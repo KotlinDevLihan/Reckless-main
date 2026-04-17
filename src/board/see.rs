@@ -1,0 +1,128 @@
+use crate::{
+    lookup::{bishop_attacks, ray_pass, rook_attacks},
+    types::{Bitboard, Color, Move, PieceType},
+};
+
+impl super::Board {
+    /// Checks if the static exchange evaluation (SEE) of a move meets the given `threshold`,
+    /// indicating that the sequence of captures on a single square, starting with the move,
+    /// results in a value greater than or equal to the threshold for the side to move.
+    ///
+    /// Promotions and castling always pass this check.
+    pub fn see(&self, mv: Move, threshold: i32) -> bool {
+        if mv.is_castling() {
+            return true;
+        }
+
+        let from = mv.from();
+        let to = mv.to();
+        let moved = self.piece_on(from);
+        let moved_value = if mv.is_promotion() { mv.promo_piece_type().value() } else { moved.value() };
+
+        // In the best case, we win a piece, but still end up with a negative balance
+        let mut balance = self.move_value(mv) - threshold;
+        if balance < 0 {
+            return false;
+        }
+
+        // In the worst case, we lose a piece, but still end up with a non-negative balance
+        balance -= moved_value;
+
+        if balance >= 0 {
+            return true;
+        }
+
+        // Note: no need to set the "to" square
+        let mut occupancies = self.occupancies();
+        occupancies.clear(from);
+
+        if mv.is_en_passant() {
+            occupancies.clear(to ^ 8);
+        }
+
+        let mut attackers = self.attackers_to(to, occupancies) & occupancies;
+        let mut stm = !self.side_to_move();
+
+        let diagonal = self.pieces2(PieceType::Bishop, PieceType::Queen);
+        let orthogonal = self.pieces2(PieceType::Rook, PieceType::Queen);
+
+        let king_rays = [ray_pass(self.king_square(Color::White), to), ray_pass(self.king_square(Color::Black), to)];
+
+        loop {
+            let mut our_attackers = attackers & self.colors(stm);
+
+            // Exclude pinned pieces if pinners are still on the board
+            if (self.pinners(!stm) & occupancies) != Bitboard(0) {
+                our_attackers &= !(self.pinned(stm) & !king_rays[stm]);
+            }
+
+            if our_attackers.is_empty() {
+                break;
+            }
+
+            let attacker = self.least_valuable_attacker(our_attackers);
+
+            // The king cannot capture a protected piece; the side to move loses the exchange
+            if attacker == PieceType::King && !(attackers & self.colors(!stm)).is_empty() {
+                break;
+            }
+
+            // Make the capture
+            occupancies.clear((self.pieces(attacker) & our_attackers).lsb());
+            stm = !stm;
+
+            // Assume our piece is going to be captured
+            balance = -balance - 1 - attacker.value();
+            if balance >= 0 {
+                break;
+            }
+
+            // Capturing a piece may reveal a new sliding attacker
+            if matches!(attacker, PieceType::Pawn | PieceType::Bishop | PieceType::Queen) {
+                attackers |= bishop_attacks(to, occupancies) & diagonal;
+            }
+            if matches!(attacker, PieceType::Rook | PieceType::Queen) {
+                attackers |= rook_attacks(to, occupancies) & orthogonal;
+            }
+            attackers &= occupancies;
+        }
+
+        // The last side to move has failed to capture back
+        // since it has no more attackers and, therefore, is losing
+        stm != self.side_to_move()
+    }
+
+    fn move_value(&self, mv: Move) -> i32 {
+        if mv.is_en_passant() {
+            return PieceType::Pawn.value();
+        }
+
+        let capture = self.piece_on(mv.to()).piece_type();
+        let mut value = capture.value();
+
+        if mv.is_promotion() {
+            value += mv.promo_piece_type().value() - PieceType::Pawn.value()
+        }
+        value
+    }
+
+    fn least_valuable_attacker(&self, attackers: Bitboard) -> PieceType {
+        if !(self.pieces(PieceType::Pawn) & attackers).is_empty() {
+            return PieceType::Pawn;
+        }
+        if !(self.pieces(PieceType::Knight) & attackers).is_empty() {
+            return PieceType::Knight;
+        }
+        if !(self.pieces(PieceType::Bishop) & attackers).is_empty() {
+            return PieceType::Bishop;
+        }
+        if !(self.pieces(PieceType::Rook) & attackers).is_empty() {
+            return PieceType::Rook;
+        }
+        if !(self.pieces(PieceType::Queen) & attackers).is_empty() {
+            return PieceType::Queen;
+        }
+        debug_assert!(!(self.pieces(PieceType::King) & attackers).is_empty());
+        PieceType::King
+    }
+}

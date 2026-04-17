@@ -1,0 +1,202 @@
+use crate::types::{Bitboard, Color, File, Piece, PieceType, Square, ZOBRIST};
+
+include!(concat!(env!("OUT_DIR"), "/lookup.rs"));
+
+static mut BETWEEN: [[Bitboard; 64]; 64] = [[Bitboard(0); 64]; 64];
+static mut RAY_PASS: [[Bitboard; 64]; 64] = [[Bitboard(0); 64]; 64];
+
+static mut CUCKOO: [u64; 0x2000] = [0; 0x2000];
+static mut A: [Square; 0x2000] = [Square::None; 0x2000];
+static mut B: [Square; 0x2000] = [Square::None; 0x2000];
+
+pub fn initialize() {
+    unsafe {
+        init_luts();
+        init_cuckoo();
+    }
+}
+
+unsafe fn init_luts() {
+    for a in 0..64 {
+        for b in 0..64 {
+            let a = Square::new(a);
+            let b = Square::new(b);
+
+            if rook_attacks(a, Bitboard(0)).contains(b) {
+                BETWEEN[a][b] = rook_attacks(a, b.to_bb()) & rook_attacks(b, a.to_bb());
+                RAY_PASS[a][b] = rook_attacks(a, Bitboard(0)) & rook_attacks(b, a.to_bb());
+                RAY_PASS[a][b].set(b);
+            }
+
+            if bishop_attacks(a, Bitboard(0)).contains(b) {
+                BETWEEN[a][b] = bishop_attacks(a, b.to_bb()) & bishop_attacks(b, a.to_bb());
+                RAY_PASS[a][b] = bishop_attacks(a, Bitboard(0)) & bishop_attacks(b, a.to_bb());
+                RAY_PASS[a][b].set(b);
+            }
+        }
+    }
+}
+
+unsafe fn init_cuckoo() {
+    fn is_reversible_move(piece: Piece, a: Square, b: Square) -> bool {
+        match piece.piece_type() {
+            PieceType::Knight => knight_attacks(a).contains(b),
+            PieceType::Bishop => bishop_attacks(a, Bitboard(0)).contains(b),
+            PieceType::Rook => rook_attacks(a, Bitboard(0)).contains(b),
+            PieceType::Queen => queen_attacks(a, Bitboard(0)).contains(b),
+            PieceType::King => king_attacks(a).contains(b),
+            _ => unreachable!(),
+        }
+    }
+
+    for index in 2..12 {
+        let piece = Piece::from_index(index);
+
+        debug_assert!(piece.piece_type() != PieceType::Pawn);
+
+        for a in 0..64 {
+            for b in (a + 1)..64 {
+                let mut a = Square::new(a);
+                let mut b = Square::new(b);
+
+                if !is_reversible_move(piece, a, b) {
+                    continue;
+                }
+
+                let mut mv = ZOBRIST.pieces[piece][a] ^ ZOBRIST.pieces[piece][b] ^ ZOBRIST.side;
+                let mut i = h1(mv);
+
+                loop {
+                    std::mem::swap(&mut CUCKOO[i], &mut mv);
+                    std::mem::swap(&mut A[i], &mut a);
+                    std::mem::swap(&mut B[i], &mut b);
+
+                    if a == Square::None && b == Square::None {
+                        break;
+                    }
+
+                    i = if i == h1(mv) { h2(mv) } else { h1(mv) };
+                }
+            }
+        }
+    }
+}
+
+pub const fn h1(h: u64) -> usize {
+    ((h >> 32) & 0x1fff) as usize
+}
+
+pub const fn h2(h: u64) -> usize {
+    ((h >> 48) & 0x1fff) as usize
+}
+
+pub fn cuckoo(index: usize) -> u64 {
+    unsafe { CUCKOO[index] }
+}
+
+pub fn cuckoo_a(index: usize) -> Square {
+    unsafe { A[index] }
+}
+
+pub fn cuckoo_b(index: usize) -> Square {
+    unsafe { B[index] }
+}
+
+pub fn between(a: Square, b: Square) -> Bitboard {
+    unsafe { BETWEEN[a as usize][b as usize] }
+}
+
+pub fn ray_pass(a: Square, b: Square) -> Bitboard {
+    unsafe { RAY_PASS[a as usize][b as usize] }
+}
+
+pub fn diagonal(sq: Square) -> Bitboard {
+    unsafe { Bitboard(*DIAGONAL.get_unchecked(sq as usize)) }
+}
+
+pub fn anti_diagonal(sq: Square) -> Bitboard {
+    unsafe { Bitboard(*ANTI_DIAGONAL.get_unchecked(sq as usize)) }
+}
+
+pub fn relative_diagonal(color: Color, sq: Square) -> Bitboard {
+    match color {
+        Color::White => diagonal(sq),
+        Color::Black => anti_diagonal(sq),
+    }
+}
+
+pub fn relative_anti_diagonal(color: Color, sq: Square) -> Bitboard {
+    match color {
+        Color::White => anti_diagonal(sq),
+        Color::Black => diagonal(sq),
+    }
+}
+
+pub fn attacks(piece: Piece, square: Square, occupancies: Bitboard) -> Bitboard {
+    match piece.piece_type() {
+        PieceType::Pawn => pawn_attacks(square, piece.piece_color()),
+        PieceType::Knight => knight_attacks(square),
+        PieceType::Bishop => bishop_attacks(square, occupancies),
+        PieceType::Rook => rook_attacks(square, occupancies),
+        PieceType::Queen => queen_attacks(square, occupancies),
+        PieceType::King => king_attacks(square),
+        PieceType::None => Bitboard(0),
+    }
+}
+
+pub fn pawn_attacks_setwise(bb: Bitboard, color: Color) -> Bitboard {
+    let (up_right, up_left) = match color {
+        Color::White => (9, 7),
+        Color::Black => (-7, -9),
+    };
+
+    let right_attacks = (bb & !Bitboard::file(File::H)).shift(up_right);
+    let left_attacks = (bb & !Bitboard::file(File::A)).shift(up_left);
+
+    right_attacks | left_attacks
+}
+
+pub fn pawn_attacks(square: Square, color: Color) -> Bitboard {
+    unsafe {
+        match color {
+            Color::White => Bitboard(*WHITE_PAWN_MAP.get_unchecked(square as usize)),
+            Color::Black => Bitboard(*BLACK_PAWN_MAP.get_unchecked(square as usize)),
+        }
+    }
+}
+
+pub fn king_attacks(square: Square) -> Bitboard {
+    unsafe { Bitboard(*KING_MAP.get_unchecked(square as usize)) }
+}
+
+pub fn knight_attacks(square: Square) -> Bitboard {
+    unsafe { Bitboard(*KNIGHT_MAP.get_unchecked(square as usize)) }
+}
+
+pub fn rook_attacks(square: Square, occupancies: Bitboard) -> Bitboard {
+    unsafe {
+        let entry = ROOK_MAGICS.get_unchecked(square as usize);
+        let index = magic_index(occupancies, entry);
+
+        Bitboard(*ROOK_MAP.get_unchecked(index as usize))
+    }
+}
+
+pub fn bishop_attacks(square: Square, occupancies: Bitboard) -> Bitboard {
+    unsafe {
+        let entry = BISHOP_MAGICS.get_unchecked(square as usize);
+        let index = magic_index(occupancies, entry);
+
+        Bitboard(*BISHOP_MAP.get_unchecked(index as usize))
+    }
+}
+
+pub fn queen_attacks(square: Square, occupancies: Bitboard) -> Bitboard {
+    rook_attacks(square, occupancies) | bishop_attacks(square, occupancies)
+}
+
+const fn magic_index(occupancies: Bitboard, entry: &MagicEntry) -> u32 {
+    let mut hash = occupancies.0 & entry.mask;
+    hash = hash.wrapping_mul(entry.magic) >> entry.shift;
+    hash as u32 + entry.offset
+}
