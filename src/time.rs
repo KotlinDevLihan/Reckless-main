@@ -154,6 +154,10 @@ impl TimeManager {
         self.limits.clone()
     }
 
+    pub fn limits_ref(&self) -> &Limits {
+        &self.limits
+    }
+
     /// Returns the ratio of elapsed time to allocated time (0.0 to 1.0+)
     pub fn time_usage_ratio(&self) -> f64 {
         let elapsed = self.start_time.elapsed().as_secs_f64();

@@ -83,19 +83,20 @@ pub fn start(td: &mut ThreadData, report: Report, thread_count: usize) {
         // Check for ponderhit and transition from PONDERING to RUNNING
         if td.id == 0
             && td.shared.status.get() == Status::PONDERING
-            && td.shared.ponderhit.load(Ordering::Acquire) == 1
+            && td.shared.ponderhit.load(Ordering::Acquire) != 0
         {
+            td.shared.ponderhit.store(0, Ordering::Release);
             td.shared.status.set(Status::RUNNING);
             // Reset the time manager with actual time limits
             let board = &td.board;
-            if let Limits::Ponder(ref inner_limits) = td.time_manager.limits() {
+            if let Limits::Ponder(inner_limits) = td.time_manager.limits_ref() {
                 td.time_manager.ponderhit((**inner_limits).clone(), board.fullmove_number(), 100);
             }
         }
 
         // Check depth limit - all threads should respect it
-        if let Limits::Depth(maximum) = td.time_manager.limits() {
-            if depth > maximum {
+        if let Limits::Depth(maximum) = td.time_manager.limits_ref() {
+            if depth > *maximum {
                 if td.id == 0 {
                     td.shared.status.set(Status::STOPPED);
                 }
@@ -295,6 +296,12 @@ fn search<NODE: NodeType>(
 
     if !NODE::ROOT && NODE::PV {
         td.pv_table.clear(ply as usize);
+    }
+
+    // Cheap periodic stop check to reduce wasted work across threads.
+    // This is speed-positive (less useless searching after stop).
+    if td.shared.status.get() == Status::STOPPED && (td.nodes() & 1023 == 0) {
+        return Score::ZERO;
     }
 
     if td.shared.status.get() == Status::STOPPED {
@@ -1099,7 +1106,7 @@ fn search<NODE: NodeType>(
             td.noisy_history.update(all_threats, td.board.moved_piece(mv), mv.to(), captured, -noisy_malus);
         }
 
-        if !NODE::ROOT && td.stack[ply - 1].mv.is_quiet() && td.stack[ply - 1].move_count < 2 {
+        if !NODE::ROOT && td.stack[ply - 1].mv.is_quiet() && td.stack[ply - 1].move_count < 4 {
             let malus = (90 * depth - 58).min(789);
             update_continuation_histories(td, ply - 1, td.stack[ply - 1].piece, td.stack[ply - 1].mv.to(), -malus);
         }
@@ -1193,6 +1200,12 @@ fn qsearch<NODE: NodeType>(td: &mut ThreadData, mut alpha: i32, beta: i32, ply: 
     if NODE::PV {
         td.pv_table.clear(ply as usize);
         td.sel_depth = td.sel_depth.max(ply as i32);
+    }
+
+    // Cheap periodic stop check to reduce wasted work across threads.
+    // This is speed-positive (less useless searching after stop).
+    if td.shared.status.get() == Status::STOPPED && (td.nodes() & 1023 == 0) {
+        return Score::ZERO;
     }
 
     if td.id == 0 && td.shared.status.get() != Status::PONDERING && td.time_manager.check_time(td) {
@@ -1294,6 +1307,18 @@ fn qsearch<NODE: NodeType>(td: &mut ThreadData, mut alpha: i32, beta: i32, ply: 
         move_count += 1;
 
         if !is_loss(best_score) {
+            // Delta pruning (QS): if even winning the captured material can't raise alpha, skip.
+            // Speed-positive: reduces hopeless capture exploration.
+            if !in_check && is_valid(eval) {
+                let captured_value = td.board.piece_on(mv.to()).value();
+                if captured_value > 0 {
+                    let optimistic = eval + captured_value + 110;
+                    if optimistic <= alpha {
+                        continue;
+                    }
+                }
+            }
+
             // Late Move Pruning (LMP)
             if move_count >= 3 && !td.board.is_direct_check(mv) {
                 break;

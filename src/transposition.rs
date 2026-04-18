@@ -236,11 +236,12 @@ impl TranspositionTable {
             let existing_bound = entry.flags.bound();
             let existing_exact = existing_bound == Bound::Exact;
 
-            if existing_exact && bound != Bound::Exact && existing_depth >= depth - 2 {
+            // More aggressive TT write filtering - speed-positive by reducing writes
+            if existing_exact && bound != Bound::Exact && existing_depth >= depth - 3 {
                 return;
             }
 
-            if depth + 4 + 2 * tt_pv as i32 <= existing_depth && entry.flags.age() == tt_age {
+            if depth + 3 + 3 * tt_pv as i32 <= existing_depth && entry.flags.age() == tt_age {
                 return;
             }
         }

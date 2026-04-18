@@ -170,8 +170,19 @@ impl MovePicker {
                 let captured =
                     if entry.mv.is_en_passant() { PieceType::Pawn } else { td.board.piece_on(mv.to()).piece_type() };
 
-                entry.score =
-                    16 * captured.value() + td.noisy_history.get(threats, td.board.moved_piece(mv), mv.to(), captured);
+                // MVV-LVA base score + history
+                let mvv_lva = 16 * captured.value() - (td.board.piece_on(mv.from()).piece_type().value() / 2) as i32;
+                entry.score = mvv_lva + td.noisy_history.get(threats, td.board.moved_piece(mv), mv.to(), captured);
+
+                // SEE-based bonus for winning captures (speed-positive: better move ordering)
+                let see_threshold = if captured.value() > td.board.piece_on(mv.from()).piece_type().value() {
+                    // Winning capture
+                    500
+                } else {
+                    // Equal or losing capture - quick SEE test
+                    if td.board.see(mv, 0) { 300 } else { -200 }
+                };
+                entry.score += see_threshold;
 
                 if mv.is_promotion() && mv.promo_piece_type() == PieceType::Queen {
                     entry.score += 4000;
@@ -263,7 +274,7 @@ impl MovePicker {
             let stability_delta =
                 2 * (!threatened[pt].contains(to)) as i32 + threatened[pt].contains(from) as i32 - threatened[pt].contains(to) as i32;
 
-            let counter_move_bonus = if td.is_counter_move(ply, mv) { 1200 } else { 0 };
+            let counter_move_bonus = if td.is_counter_move(ply, mv) { 1500 } else { 0 };
 
             entry.score = 2048 * td.quiet_history.get(threats, side, mv) / 1024
                 + 1536 * td.conthist(ply, 1, mv) / 1024
@@ -271,10 +282,10 @@ impl MovePicker {
                 + td.conthist(ply, 4, mv)
                 + td.conthist(ply, 6, mv)
                 + escape[pt] * threatened[pt].contains(from) as i32
-                + 9325 * board.checking_squares(pt).contains(to) as i32
-                - 7584 * threatened[pt].contains(to) as i32
-                + 6158 * offense[pt].contains(to) as i32
-                + 5000 * (pt == PieceType::Rook && king_ring_ortho.contains(to)) as i32
+                + 10000 * board.checking_squares(pt).contains(to) as i32
+                - 8000 * threatened[pt].contains(to) as i32
+                + 7000 * offense[pt].contains(to) as i32
+                + 6000 * (pt == PieceType::Rook && king_ring_ortho.contains(to)) as i32
                 - 4000 * wall_pawns.contains(from) as i32
                 + 512 * center_delta
                 + 768 * king_pressure_delta
