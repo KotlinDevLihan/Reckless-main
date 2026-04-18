@@ -132,21 +132,24 @@ impl TimeManager {
     pub fn soft_limit(&self, td: &ThreadData, multiplier: impl Fn() -> f32) -> bool {
         match self.limits {
             Limits::Infinite | Limits::Depth(_) => false,
-            Limits::Nodes(maximum) => td.shared.nodes.aggregate() >= maximum,
+            Limits::Nodes(maximum) => td.shared.nodes.aggregate() > maximum,
             Limits::Time(maximum) => self.start_time.elapsed() >= Duration::from_millis(maximum),
             _ => self.start_time.elapsed() >= Duration::from_secs_f32(self.soft_bound.as_secs_f32() * multiplier()),
         }
     }
 
     pub fn check_time(&self, td: &ThreadData) -> bool {
-        if td.completed_depth == 0 {
-            return false;
-        }
-
         match self.limits {
             Limits::Infinite | Limits::Depth(_) => false,
+            // Always check nodes limit, even at depth 0 (fixes bench hang with small node limits)
             Limits::Nodes(maximum) => td.shared.nodes.aggregate() > maximum,
-            _ => td.nodes() & 2047 == 2047 && self.start_time.elapsed() >= self.hard_bound,
+            // For time-based limits, only check after completing at least one depth
+            _ => {
+                if td.completed_depth == 0 {
+                    return false;
+                }
+                td.nodes() & 2047 == 2047 && self.start_time.elapsed() >= self.hard_bound
+            }
         }
     }
 

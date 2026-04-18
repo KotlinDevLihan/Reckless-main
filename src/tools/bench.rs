@@ -70,89 +70,15 @@ const POSITIONS: &[&str] = &[
     "rqkbbnnr/pppppppp/8/8/8/8/PPPPPPPP/BBNNRKRQ w GEha - 0 1",
 ];
 
-const DEFAULT_DEPTH: i32 = 10;
+const DEFAULT_DEPTH: i32 = 12;
 const DEFAULT_HASH: usize = 16;
 const DEFAULT_THREADS: usize = 1;
-const DEFAULT_POSITION_LIMIT: usize = 12;
-const DEFAULT_PGO_DEPTH: i32 = 4;
-const DEFAULT_PGO_POSITION_LIMIT: usize = 1;
-const DEFAULT_PGO_NODES: u64 = 50_000;
 
 pub fn bench<const PRETTY: bool>(args: &[&str]) {
     #[allow(clippy::get_first)]
     let hash = args.get(0).and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_HASH);
     let threads = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_THREADS);
-
-    // `cargo pgo run` executes an instrumented binary which can be dramatically slower.
-    // Detect that case and reduce default workload unless the user explicitly provided args.
-    let is_pgo_instrumented = std::env::var_os("LLVM_PROFILE_FILE").is_some();
-
-    let mut pgo_log = if is_pgo_instrumented {
-        let cargo_target_dir = std::path::PathBuf::from("target");
-        let path = cargo_target_dir.join("pgo-bench.log");
-        let _ = std::fs::create_dir_all(&cargo_target_dir);
-        std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
-    } else {
-        None
-    };
-
-    if let Some(log) = pgo_log.as_mut() {
-        use std::io::Write;
-        let _ = writeln!(log, "bench(pgo): start");
-        let _ = log.flush();
-    }
-
-    let default_depth = if is_pgo_instrumented { DEFAULT_PGO_DEPTH } else { DEFAULT_DEPTH };
-    let default_position_limit = if is_pgo_instrumented {
-        DEFAULT_PGO_POSITION_LIMIT
-    } else {
-        DEFAULT_POSITION_LIMIT
-    };
-
-    let depth = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(default_depth);
-    let position_limit = args
-        .get(3)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default_position_limit)
-        .min(POSITIONS.len());
-
-    let nodes_limit: Option<u64> = args.get(4).and_then(|v| v.parse().ok());
-
-    if PRETTY {
-        println!(
-            "bench depth={} positions={} threads={} hash={} nodes={} pgo={}",
-            depth,
-            position_limit,
-            threads,
-            hash,
-            nodes_limit.map_or("-".to_string(), |n| n.to_string()),
-            is_pgo_instrumented
-        );
-    } else if is_pgo_instrumented {
-        println!(
-            "Bench (PGO): depth={} positions={} threads={} hash={} nodes={}",
-            depth,
-            position_limit,
-            threads,
-            hash,
-            nodes_limit.map_or("-".to_string(), |n| n.to_string())
-        );
-    }
-
-    if let Some(log) = pgo_log.as_mut() {
-        use std::io::Write;
-        let _ = writeln!(
-            log,
-            "bench(pgo): configured depth={} positions={} threads={} hash={} nodes={}",
-            depth,
-            position_limit,
-            threads,
-            hash,
-            nodes_limit.map_or("-".to_string(), |n| n.to_string())
-        );
-        let _ = log.flush();
-    }
-    let boards = POSITIONS.iter().map(|fen| Board::from_fen(fen).unwrap()).collect::<Vec<_>>();
+    let depth = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_DEPTH);
 
     let shared = Arc::new(SharedContext::default());
     shared.tt.resize(threads, hash);
@@ -170,58 +96,17 @@ pub fn bench<const PRETTY: bool>(args: &[&str]) {
 
     let time = Instant::now();
 
-    for (index, board) in boards.iter().take(position_limit).enumerate() {
+    for (index, &position) in POSITIONS.iter().enumerate() {
         let now = Instant::now();
 
-        if is_pgo_instrumented {
-            eprintln!("bench(pgo): starting position {}/{}", index + 1, position_limit);
-        }
-
-        if let Some(log) = pgo_log.as_mut() {
-            use std::io::Write;
-            let _ = writeln!(log, "bench(pgo): starting position {}/{}", index + 1, position_limit);
-            let _ = log.flush();
-        }
-
-        // Limit selection order:
-        // - if nodes are explicitly provided, always use nodes
-        // - else if PGO and user didn't pass explicit depth, use a small node budget
-        // - else use depth
-        let limits = if let Some(n) = nodes_limit {
-            Limits::Nodes(n)
-        } else if is_pgo_instrumented && args.get(2).is_none() {
-            Limits::Nodes(DEFAULT_PGO_NODES)
-        } else {
-            Limits::Depth(depth)
-        };
-
-        let time_manager = TimeManager::new(limits, 0, 0);
+        let board = Board::from_fen(position).unwrap();
+        let time_manager = TimeManager::new(Limits::Depth(depth), 0, 0);
 
         for td in &mut pool.vector {
             td.board = board.clone();
         }
 
-        if is_pgo_instrumented {
-            eprintln!("bench(pgo): executing search");
-        }
-
-        if let Some(log) = pgo_log.as_mut() {
-            use std::io::Write;
-            let _ = writeln!(log, "bench(pgo): executing search");
-            let _ = log.flush();
-        }
-
         pool.execute_searches(time_manager, Report::None, &shared);
-
-        if is_pgo_instrumented {
-            eprintln!("bench(pgo): search finished");
-        }
-
-        if let Some(log) = pgo_log.as_mut() {
-            use std::io::Write;
-            let _ = writeln!(log, "bench(pgo): search finished");
-            let _ = log.flush();
-        }
 
         nodes += shared.nodes.aggregate();
 
@@ -229,8 +114,6 @@ pub fn bench<const PRETTY: bool>(args: &[&str]) {
             let seconds = now.elapsed().as_secs_f64();
             let nps = shared.nodes.aggregate() as f64 / seconds;
             println!("{index:>3} {:>11} {seconds:>12.3}s {nps:>15.0} N/s", shared.nodes.aggregate());
-        } else if is_pgo_instrumented {
-            println!("PGO pos {} nodes {}", index, shared.nodes.aggregate());
         }
     }
 
@@ -240,10 +123,9 @@ pub fn bench<const PRETTY: bool>(args: &[&str]) {
     if PRETTY {
         println!("{}", "-".repeat(50));
         println!("{nodes:>15} {seconds:>12.3}s {nps:>15.0} N/s");
-        println!("{:>15} {:>12} {:>15}", position_limit, depth, "positions/depth");
         println!("{}", "-".repeat(50));
     } else {
-        println!("Bench: {nodes} nodes {nps:.0} nps ({position_limit} positions depth {depth})");
+        println!("Bench: {nodes} nodes {nps:.0} nps");
     }
 
     crate::misc::dbg_print();

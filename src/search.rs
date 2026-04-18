@@ -146,7 +146,20 @@ pub fn start(td: &mut ThreadData, report: Report, thread_count: usize) {
             td.optimism[td.board.side_to_move()] = 159 * best_avg / (best_avg.abs() + 186);
             td.optimism[!td.board.side_to_move()] = -td.optimism[td.board.side_to_move()];
 
+            // Aspiration window loop - limit iterations to prevent getting stuck at high depths
+            let mut asp_attempts = 0;
+            const MAX_ASP_ATTEMPTS: i32 = 12;
+
             loop {
+                asp_attempts += 1;
+
+                // Safety: if we've tried too many times, just use infinite window
+                if asp_attempts > MAX_ASP_ATTEMPTS {
+                    alpha = -Score::INFINITE;
+                    beta = Score::INFINITE;
+                    reduction = 0;
+                }
+
                 td.stack = Stack::new();
                 td.root_delta = beta - alpha;
 
@@ -171,7 +184,8 @@ pub fn start(td: &mut ThreadData, report: Report, thread_count: usize) {
                         // Fail-high: increase reduction gradually, widen window
                         alpha = (beta - delta).max(alpha);
                         beta = (score + delta).min(Score::INFINITE);
-                        reduction += 1;
+                        // Cap reduction to prevent effective depth from dropping too low
+                        reduction = (reduction + 1).min(depth / 3);
                         delta += 58 * delta / 128 + 3;
                     }
                     _ => {
